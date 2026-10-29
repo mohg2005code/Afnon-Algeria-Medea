@@ -7,6 +7,9 @@ on:
       - "Afnon-Algeria-Medea-Glass-v2.zip"
       - ".github/workflows/build-release.yml"
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -63,3 +66,13 @@ jobs:
         with:
           name: Afnon-Algeria-Medea-Release
           path: app/build/outputs/apk/release/*.apk
+
+      - name: Publish APK to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v1.0.${{ github.run_number }}"
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" app/build/outputs/apk/release/*.apk \
+            --title "Afnon Algeria Médéa $TAG" \
+            --notes "Afnon Android TV — Algeria/Médéa default + IPTV audio ducking during adhan."
