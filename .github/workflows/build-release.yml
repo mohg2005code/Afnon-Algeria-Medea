@@ -58,14 +58,14 @@ jobs:
       - name: Check Java version
         run: java -version
 
-      - name: Build Release APK
-        run: ./gradlew assembleRelease --stacktrace
+      - name: Build Signed APK
+        run: ./gradlew assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Afnon-Algeria-Medea-Release
-          path: app/build/outputs/apk/release/*.apk
+          path: app/build/outputs/apk/debug/app-debug.apk
 
       - name: Publish APK to GitHub Release
         env:
@@ -73,6 +73,6 @@ jobs:
         run: |
           TAG="v1.0.${{ github.run_number }}"
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$TAG" app/build/outputs/apk/release/*.apk \
+          gh release create "$TAG" app/build/outputs/apk/debug/app-debug.apk \
             --title "Afnon Algeria Médéa $TAG" \
-            --notes "Afnon Android TV — Algeria/Médéa default + IPTV audio ducking during adhan."
+            --notes "Afnon Android TV — Algeria/Médéa default + IPTV audio ducking during adhan. Signed debug APK for direct installation."
