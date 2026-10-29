@@ -1,0 +1,33 @@
+name: Build Afnon Release APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "Afnon-Algeria-Medea-Glass-v2.zip"
+      - ".github/workflows/build-release.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract project
+        run: |
+          unzip -q Afnon-Algeria-Medea-Glass-v2.zip -d extracted
+          cp -a extracted/. .
+
+      - name: Make Gradle executable
+        run: chmod +x gradlew
+
+      - name: Build Release APK
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Afnon-Algeria-Medea-Release
+          path: app/build/outputs/apk/release/*.apk
