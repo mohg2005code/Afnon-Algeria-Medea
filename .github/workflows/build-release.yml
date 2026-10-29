@@ -27,6 +27,28 @@ jobs:
           unzip -q Afnon-Algeria-Medea-Glass-v2.zip -d extracted
           cp -a extracted/. .
 
+      - name: Apply Algeria/Medea and IPTV audio ducking
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          prefs = Path("app/src/main/java/tv/afnon/home/Prefs.java")
+          text = prefs.read_text()
+          old = 'of(c).getString("city", "cairo")'
+          new = 'of(c).getString("city", "medea")'
+          if old not in text:
+              raise SystemExit("Expected city default not found")
+          prefs.write_text(text.replace(old, new, 1))
+
+          now = Path("app/src/main/java/tv/afnon/home/NowActivity.java")
+          text = now.read_text()
+          old = 'AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)'
+          new = 'AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)'
+          if old not in text:
+              raise SystemExit("Expected audio focus mode not found")
+          now.write_text(text.replace(old, new, 1))
+          PY
+
       - name: Make Gradle executable
         run: chmod +x gradlew
 
