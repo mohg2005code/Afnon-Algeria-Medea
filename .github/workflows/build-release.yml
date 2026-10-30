@@ -30,7 +30,7 @@ jobs:
           unzip -q Afnon-Algeria-Medea-Glass-v2.zip -d extracted
           cp -a extracted/. .
 
-      - name: Apply Algeria/Medea and IPTV audio ducking
+      - name: Apply Algeria/Medea, IPTV audio ducking, and background test
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -50,6 +50,14 @@ jobs:
           if old not in text:
               raise SystemExit("Expected audio focus mode not found")
           now.write_text(text.replace(old, new, 1))
+
+          main = Path("app/src/main/java/tv/afnon/home/MainActivity.java")
+          text = main.read_text()
+          old = '''    @Override\n    protected void onCreate(Bundle state) {\n        super.onCreate(state);\n        runTest(getIntent());\n    }\n'''
+          new = '''    @Override\n    protected void onCreate(Bundle state) {\n        super.onCreate(state);\n        runTest(getIntent());\n        // Background adhan test build: give the user time to press Home and open IPTV.\n        // The AccessibilityService owns the timer, so the test continues after this Activity is paused.\n        new Handler(Looper.getMainLooper()).postDelayed(() -> {\n            if (RemoteKeys.watch != null) {\n                RemoteKeys.watch.test("announce", 8000);\n                Toast.makeText(this, "اختبار الأذان: اخرج بزر Home الآن", Toast.LENGTH_LONG).show();\n            } else {\n                Toast.makeText(this, "خدمة Afnon remote buttons غير مفعلة", Toast.LENGTH_LONG).show();\n            }\n        }, 1000);\n    }\n'''
+          if old not in text:
+              raise SystemExit("Expected MainActivity onCreate block not found")
+          main.write_text(text.replace(old, new, 1))
           PY
 
       - name: Make Gradle executable
@@ -64,7 +72,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Afnon-Algeria-Medea-Release
+          name: Afnon-Algeria-Medea-Background-Test
           path: app/build/outputs/apk/debug/app-debug.apk
 
       - name: Publish APK to GitHub Release
@@ -74,5 +82,5 @@ jobs:
           TAG="v1.0.${{ github.run_number }}"
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$TAG" app/build/outputs/apk/debug/app-debug.apk \
-            --title "Afnon Algeria Médéa $TAG" \
-            --notes "Afnon Android TV — Algeria/Médéa default + IPTV audio ducking during adhan. Signed debug APK for direct installation."
+            --title "Afnon Algeria Médéa Background Test $TAG" \
+            --notes "Temporary test build: after opening Afnon, the AccessibilityService schedules a test announcement 8 seconds later so the user can press Home and open IPTV. Also includes Algeria/Médéa default and IPTV audio ducking during adhan."
