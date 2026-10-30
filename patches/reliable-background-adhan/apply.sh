@@ -47,7 +47,7 @@ s = p.read_text()
 needle = '<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />'
 if needle not in s:
     raise SystemExit('manifest permission marker not found')
-add = needle + '''\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />'''
+add = needle + '''\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />'''
 s = s.replace(needle, add, 1)
 marker = '        <!-- Remote buttons. Turned on with:'
 if marker not in s:
@@ -59,3 +59,23 @@ PY
 
 # The source intentionally excludes the recordings. Use the project's own release helper.
 bash tools/fetch-adhans.sh
+
+# Avoid crashing MainActivity on Android builds where exact-alarm access is not granted.
+python3 - <<'PY'
+from pathlib import Path
+p = Path('app/src/main/java/tv/afnon/home/PrayerAlarm.java')
+s = p.read_text()
+s = s.replace('        am.setAlarmClock(new AlarmManager.AlarmClockInfo(when, pi), pi);', '''        try {
+            am.setAlarmClock(new AlarmManager.AlarmClockInfo(when, pi), pi);
+        } catch (SecurityException denied) {
+            // Some Android TV firmware does not grant exact-alarm access by default.
+            // Keep the app usable and fall back to a small inexact window instead of crashing.
+            am.setWindow(AlarmManager.RTC_WAKEUP, when, 60_000L, pi);
+        }''', 1)
+s = s.replace('        am.setAlarmClock(new AlarmManager.AlarmClockInfo(when, pi), pi);', '''        try {
+            am.setAlarmClock(new AlarmManager.AlarmClockInfo(when, pi), pi);
+        } catch (SecurityException denied) {
+            am.setWindow(AlarmManager.RTC_WAKEUP, when, 30_000L, pi);
+        }''', 1)
+p.write_text(s)
+PY
