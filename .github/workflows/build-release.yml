@@ -34,6 +34,7 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           prefs = Path("app/src/main/java/tv/afnon/home/Prefs.java")
           text = prefs.read_text()
@@ -53,19 +54,22 @@ jobs:
 
           remote = Path("app/src/main/java/tv/afnon/home/RemoteKeys.java")
           text = remote.read_text()
-          old = '''        watch = new PrayerWatch(this); watch.start();\n'''
-          new = '''        watch = new PrayerWatch(this); watch.start();\n        // Background test: schedule only after AccessibilityService is actually connected.\n        watch.test("announce", 8000);\n'''
-          if old not in text:
-              raise SystemExit("Expected RemoteKeys watch startup not found")
-          remote.write_text(text.replace(old, new, 1))
+          if 'watch.test("announce", 8000);' not in text:
+              pattern = r'(watch\s*=\s*new\s+PrayerWatch\(this\);\s*watch\.start\(\);)'
+              replacement = r'\1\n        // Background test: schedule after AccessibilityService is actually connected.\n        watch.test("announce", 8000);'
+              text2, count = re.subn(pattern, replacement, text, count=1)
+              if count != 1:
+                  raise SystemExit("Could not find PrayerWatch startup")
+              remote.write_text(text2)
 
           main = Path("app/src/main/java/tv/afnon/home/MainActivity.java")
           text = main.read_text()
-          old = '''    @Override\n    protected void onCreate(Bundle state) {\n        super.onCreate(state);\n        runTest(getIntent());\n    }\n'''
-          if old not in text:
-              raise SystemExit("Expected MainActivity onCreate block not found")
-          new = '''    @Override\n    protected void onCreate(Bundle state) {\n        super.onCreate(state);\n        runTest(getIntent());\n        Toast.makeText(this, "اختبار الأذان: اخرج بزر Home الآن", Toast.LENGTH_LONG).show();\n    }\n'''
-          main.write_text(text.replace(old, new, 1))
+          if 'اختبار الأذان: اخرج بزر Home الآن' not in text:
+              marker = 'runTest(getIntent());'
+              if marker not in text:
+                  raise SystemExit("Could not find MainActivity test hook")
+              text = text.replace(marker, marker + '\n        Toast.makeText(this, "اختبار الأذان: اخرج بزر Home الآن", Toast.LENGTH_LONG).show();', 1)
+              main.write_text(text)
           PY
 
       - name: Make Gradle executable
