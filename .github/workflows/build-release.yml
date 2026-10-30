@@ -30,46 +30,318 @@ jobs:
           unzip -q Afnon-Algeria-Medea-Glass-v2.zip -d extracted
           cp -a extracted/. .
 
-      - name: Apply Algeria/Medea, IPTV audio ducking, and robust background test
+      - name: Apply Algeria/Medea and reliable background adhan
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import re
 
-          prefs = Path("app/src/main/java/tv/afnon/home/Prefs.java")
-          text = prefs.read_text()
-          old = 'of(c).getString("city", "cairo")'
-          new = 'of(c).getString("city", "medea")'
-          if old not in text:
-              raise SystemExit("Expected city default not found")
-          prefs.write_text(text.replace(old, new, 1))
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f"Expected {label} not found")
+              p.write_text(text.replace(old, new, 1))
 
-          now = Path("app/src/main/java/tv/afnon/home/NowActivity.java")
-          text = now.read_text()
-          old = 'AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)'
-          new = 'AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)'
-          if old not in text:
-              raise SystemExit("Expected audio focus mode not found")
-          now.write_text(text.replace(old, new, 1))
+          # Algeria / Medea default.
+          replace_once(
+              "app/src/main/java/tv/afnon/home/Prefs.java",
+              'of(c).getString("city", "cairo")',
+              'of(c).getString("city", "medea")',
+              "city default")
 
-          remote = Path("app/src/main/java/tv/afnon/home/RemoteKeys.java")
-          text = remote.read_text()
-          if 'watch.test("announce", 8000);' not in text:
-              pattern = r'(watch\s*=\s*new\s+PrayerWatch\(this\);\s*watch\.start\(\);)'
-              replacement = r'\1\n        // Background test: schedule after AccessibilityService is actually connected.\n        watch.test("announce", 8000);'
-              text2, count = re.subn(pattern, replacement, text, count=1)
-              if count != 1:
-                  raise SystemExit("Could not find PrayerWatch startup")
-              remote.write_text(text2)
+          # Manual call screen and the background service both use MAY_DUCK so IPTV/radio is lowered, not paused.
+          replace_once(
+              "app/src/main/java/tv/afnon/home/NowActivity.java",
+              'AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)',
+              'AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)',
+              "NowActivity audio focus")
+
+          # The source intentionally excludes the recordings; fetch the same recordings used by the project's
+          # release process so the APK can actually play the adhan.
+          bash_tools = Path("tools/fetch-adhans.sh")
+          if bash_tools.exists():
+              import subprocess
+              subprocess.run(["bash", str(bash_tools)], check=True)
+
+          alarm = Path("app/src/main/java/tv/afnon/home/PrayerAlarm.java")
+          alarm.write_text(r'''package tv.afnon.home;
+
+import android.app.AlarmManager;
+import android.app.PendingIntent;
+import android.content.Context;
+import android.content.Intent;
+import android.os.Build;
+
+import java.util.Date;
+
+/** Schedules the next prayer independently of the AccessibilityService. */
+final class PrayerAlarm {
+    static final String ACTION_PRAYER = "tv.afnon.home.PRAYER_ALARM";
+    static final String ACTION_TEST = "tv.afnon.home.TEST_ADHAN_ALARM";
+    private static final int REQUEST = 2407;
+    private static final int TEST_REQUEST = 2408;
+    private static final String TEST_PENDING = "background_test_pending";
+
+    private PrayerAlarm() {}
+
+    static void schedule(Context c) {
+        Context app = c.getApplicationContext();
+        PrayerDay day = new PrayerDay(app, new Date());
+        long when = day.nextTime.getTime();
+        if (when <= System.currentTimeMillis() + 1000L) return;
+        AlarmManager am = app.getSystemService(AlarmManager.class);
+        if (am == null) return;
+        PendingIntent pi = pending(app, ACTION_PRAYER, REQUEST);
+        am.setAlarmClock(new AlarmManager.AlarmClockInfo(when, pi), pi);
+    }
+
+    static void scheduleTest(Context c) {
+        Context app = c.getApplicationContext();
+        android.content.SharedPreferences p = Prefs.of(app);
+        if (p.getBoolean(TEST_PENDING, false)) return;
+        AlarmManager am = app.getSystemService(AlarmManager.class);
+        if (am == null) return;
+        long when = System.currentTimeMillis() + 15_000L;
+        PendingIntent pi = pending(app, ACTION_TEST, TEST_REQUEST);
+        am.setAlarmClock(new AlarmManager.AlarmClockInfo(when, pi), pi);
+        p.edit().putBoolean(TEST_PENDING, true).apply();
+    }
+
+    static void clearTest(Context c) {
+        Prefs.of(c.getApplicationContext()).edit().remove(TEST_PENDING).apply();
+    }
+
+    private static PendingIntent pending(Context c, String action, int request) {
+        Intent i = new Intent(c, PrayerAlarmReceiver.class).setAction(action);
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
+        return PendingIntent.getBroadcast(c, request, i, flags);
+    }
+}
+''')
+
+          receiver = Path("app/src/main/java/tv/afnon/home/PrayerAlarmReceiver.java")
+          receiver.write_text(r'''package tv.afnon.home;
+
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.os.Build;
+
+import java.util.Date;
+
+/** AlarmManager entry point; survives Home/app changes and recreates the next alarm after each trigger. */
+public final class PrayerAlarmReceiver extends BroadcastReceiver {
+    private static final long WINDOW_MS = 5 * 60_000L;
+
+    @Override public void onReceive(Context context, Intent intent) {
+        Context app = context.getApplicationContext();
+        String action = intent == null ? null : intent.getAction();
+
+        if (PrayerAlarm.ACTION_TEST.equals(action)) {
+            PrayerAlarm.clearTest(app);
+            startAdhan(app, PrayerDay.DHUHR, System.currentTimeMillis());
+            PrayerAlarm.schedule(app);
+            return;
+        }
+
+        if (Intent.ACTION_BOOT_COMPLETED.equals(action)
+                || Intent.ACTION_TIME_CHANGED.equals(action)
+                || Intent.ACTION_TIMEZONE_CHANGED.equals(action)) {
+            PrayerAlarm.schedule(app);
+            return;
+        }
+
+        if (!PrayerAlarm.ACTION_PRAYER.equals(action)) return;
+
+        Date now = new Date();
+        PrayerDay day = new PrayerDay(app, now);
+        int prayer = Reminders.dueCall(app, day, now);
+        if (prayer >= 0) {
+            String key = prayer + ":" + day.times[prayer].getTime();
+            String old = Prefs.of(app).getString("called", "");
+            if (!key.equals(old)) {
+                Prefs.of(app).edit().putString("called", key).apply();
+                startAdhan(app, prayer, day.times[prayer].getTime());
+            }
+        } else {
+            // If firmware delivered the alarm a little late, still accept the matching prayer within 5 minutes.
+            for (int i = 0; i < 6; i++) {
+                if (i == PrayerDay.SUNRISE) continue;
+                long since = now.getTime() - day.times[i].getTime();
+                if (since >= 0 && since < WINDOW_MS && Prefs.adhan(app) && Prefs.bell(app, i)) {
+                    String key = i + ":" + day.times[i].getTime();
+                    if (!key.equals(Prefs.of(app).getString("called", ""))) {
+                        Prefs.of(app).edit().putString("called", key).apply();
+                        startAdhan(app, i, day.times[i].getTime());
+                    }
+                    break;
+                }
+            }
+        }
+        PrayerAlarm.schedule(app);
+    }
+
+    private static void startAdhan(Context c, int prayer, long time) {
+        Intent i = new Intent(c, AdhanService.class)
+            .setAction(AdhanService.ACTION_PLAY)
+            .putExtra(AdhanService.EXTRA_PRAYER, prayer)
+            .putExtra(AdhanService.EXTRA_TIME, time);
+        if (Build.VERSION.SDK_INT >= 26) c.startForegroundService(i);
+        else c.startService(i);
+    }
+}
+''')
+
+          service = Path("app/src/main/java/tv/afnon/home/AdhanService.java")
+          service.write_text(r'''package tv.afnon.home;
+
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.Service;
+import android.content.Intent;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
+import android.media.MediaPlayer;
+import android.os.Build;
+import android.os.IBinder;
+
+import java.io.IOException;
+
+/** Foreground media service: the adhan continues after Home/another app takes the foreground. */
+public final class AdhanService extends Service {
+    static final String ACTION_PLAY = "tv.afnon.home.PLAY_ADHAN";
+    static final String EXTRA_PRAYER = "prayer";
+    static final String EXTRA_TIME = "time";
+    private static final int NOTIFICATION_ID = 2407;
+    private MediaPlayer player;
+    private AudioFocusRequest focus;
+
+    @Override public int onStartCommand(Intent intent, int flags, int startId) {
+        int prayer = intent == null ? PrayerDay.DHUHR : intent.getIntExtra(EXTRA_PRAYER, PrayerDay.DHUHR);
+        startForeground(NOTIFICATION_ID, notification());
+        play(prayer);
+        return START_NOT_STICKY;
+    }
+
+    private Notification notification() {
+        String channelId = "adhan_playback";
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        if (Build.VERSION.SDK_INT >= 26 && nm != null) {
+            NotificationChannel ch = new NotificationChannel(channelId, "الأذان", NotificationManager.IMPORTANCE_LOW);
+            nm.createNotificationChannel(ch);
+        }
+        if (Build.VERSION.SDK_INT >= 26) {
+            return new Notification.Builder(this, channelId)
+                .setContentTitle("الأذان")
+                .setContentText("يُشغّل الأذان")
+                .setSmallIcon(R.drawable.ic_arch)
+                .setOngoing(true)
+                .build();
+        }
+        return new Notification.Builder(this)
+            .setContentTitle("الأذان")
+            .setContentText("يُشغّل الأذان")
+            .setSmallIcon(R.drawable.ic_arch)
+            .setOngoing(true)
+            .build();
+    }
+
+    private void play(int prayer) {
+        stopPlayback();
+        boolean fajr = prayer == PrayerDay.FAJR;
+        String id = Prefs.voice(this, fajr);
+        MediaPlayer mp = new MediaPlayer();
+        AudioAttributes attrs = new AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+            .build();
+        try (android.content.res.AssetFileDescriptor fd = getAssets().openFd("adhan/" + id + ".mp3")) {
+            mp.setAudioAttributes(attrs);
+            mp.setDataSource(fd.getFileDescriptor(), fd.getStartOffset(), fd.getLength());
+            mp.prepare();
+        } catch (IOException | RuntimeException e) {
+            mp.release();
+            stopSelf();
+            return;
+        }
+        AudioManager am = getSystemService(AudioManager.class);
+        focus = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+            .setAudioAttributes(attrs)
+            .build();
+        if (am != null) am.requestAudioFocus(focus);
+        player = mp;
+        mp.setOnCompletionListener(p -> stopSelf());
+        mp.start();
+    }
+
+    private void stopPlayback() {
+        if (player != null) {
+            try { player.stop(); } catch (IllegalStateException ignored) {}
+            player.release();
+            player = null;
+        }
+        AudioManager am = getSystemService(AudioManager.class);
+        if (am != null && focus != null) am.abandonAudioFocusRequest(focus);
+        focus = null;
+    }
+
+    @Override public void onDestroy() {
+        stopPlayback();
+        super.onDestroy();
+    }
+
+    @Override public IBinder onBind(Intent intent) { return null; }
+}
+''')
+
+          manifest = Path("app/src/main/AndroidManifest.xml")
+          text = manifest.read_text()
+          text = text.replace(
+              '<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />',
+              '<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />\n'
+              '    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n'
+              '    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n'
+              '    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />', 1)
+          marker = '        <!-- Remote buttons. Turned on with:'
+          insert = '''        <receiver
+            android:name=".PrayerAlarmReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="tv.afnon.home.PRAYER_ALARM" />
+                <action android:name="tv.afnon.home.TEST_ADHAN_ALARM" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name=".AdhanService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+'''
+          if marker not in text:
+              raise SystemExit("Manifest insertion marker not found")
+          text = text.replace(marker, insert + marker, 1)
+          manifest.write_text(text)
 
           main = Path("app/src/main/java/tv/afnon/home/MainActivity.java")
           text = main.read_text()
-          if 'اختبار الأذان: اخرج بزر Home الآن' not in text:
-              marker = 'runTest(getIntent());'
-              if marker not in text:
-                  raise SystemExit("Could not find MainActivity test hook")
-              text = text.replace(marker, marker + '\n        Toast.makeText(this, "اختبار الأذان: اخرج بزر Home الآن", Toast.LENGTH_LONG).show();', 1)
-              main.write_text(text)
+          old = 'super.onCreate(state);\n        runTest(getIntent());'
+          new = 'super.onCreate(state);\n        PrayerAlarm.schedule(this);\n        PrayerAlarm.scheduleTest(this);\n        runTest(getIntent());'
+          if old not in text:
+              raise SystemExit("MainActivity onCreate marker not found")
+          text = text.replace(old, new, 1)
+          old2 = 'RemoteKeys.ensureOn(this);\n        if (!builtApps.equals(appsKey())) build();'
+          new2 = 'RemoteKeys.ensureOn(this);\n        PrayerAlarm.schedule(this);\n        if (!builtApps.equals(appsKey())) build();'
+          if old2 not in text:
+              raise SystemExit("MainActivity onResume marker not found")
+          text = text.replace(old2, new2, 1)
+          main.write_text(text)
           PY
 
       - name: Make Gradle executable
@@ -84,7 +356,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Afnon-Algeria-Medea-Background-Test
+          name: Afnon-Algeria-Medea-Reliable-Adhan
           path: app/build/outputs/apk/debug/app-debug.apk
 
       - name: Publish APK to GitHub Release
@@ -94,5 +366,5 @@ jobs:
           TAG="v1.0.${{ github.run_number }}"
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$TAG" app/build/outputs/apk/debug/app-debug.apk \
-            --title "Afnon Algeria Médéa Background Test $TAG" \
-            --notes "Temporary test build: the AccessibilityService schedules a test announcement 8 seconds after the service actually connects, so the user can press Home and open IPTV. Also includes Algeria/Médéa default and IPTV audio ducking during adhan."
+            --title "Afnon Algeria Médéa Reliable Background Adhan $TAG" \
+            --notes "Background adhan uses AlarmManager + foreground media playback service, with IPTV audio ducking. Includes a one-time 15-second background test after opening Afnon." 
